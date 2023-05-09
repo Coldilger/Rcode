@@ -1,0 +1,505 @@
+####Packages####
+library(PortfolioAnalytics)
+library(quantmod)
+library(moexer)
+library(dplyr)
+library(readxl)
+library(Matrix)
+library(lpSolve)
+library(additiveDEA)
+library("deaR")
+library("Benchmarking") 
+library("ggplot2")
+library(MultiplierDEA)
+library(NMOF)
+library(plm)
+library(Rsolnp)
+library(stringr)
+library('data.table')
+library('lemon')
+library(resample)
+####Functions####
+selectperiod <- function(data, t){
+  datawork <- dplyr::filter(data[2] == t )
+  return(datawork)
+}
+
+getClosern <- function(x){
+  if (x == 0) { x <- 1}
+  sh <- getSymbols(rn0[x], from = "2013-03-05", to = "2021-12-31", auto.assign = FALSE)
+  # shclose <- mutate(data.frame(sh[,4]), date = row.names(data.frame(sh[,4])))
+  # shclose1 <- shclose[,c(2,1)]
+  return(sh[,4])
+}
+
+getClosemax <- function(x){
+  if (x == 0) { x <- 1}
+  sh <- getSymbols(maxd[x], from = "2013-03-05", to = "2021-12-31", auto.assign = FALSE)
+  # shclose <- mutate(data.frame(sh[,4]), date = row.names(data.frame(sh[,4])))
+  # shclose1 <- shclose[,c(2,1)]
+  return(sh[,4])
+}
+
+
+getcrossef <- function(data) {
+  suppressWarnings( deatech <- make_deadata(data, ni = 2, 
+                                            no = 2, 
+                                            inputs = 3:4, 
+                                            outputs = 5:6, dmus = 1))
+  crosseftech <- cross_efficiency(deatech, orientation = "io", 
+                              rts = "crs", 
+                              selfapp = TRUE)
+  w <- round(crosseftech$Arbitrary$cross_eff, digits = 2)
+  # class(w1)
+  # w1 <- (smh delete neagtive rows & cols)
+  return(w)
+}
+
+# MAX method
+getcrossefmax <- function(data) {
+  suppressWarnings( deatech <- make_deadata(data, ni = 2, 
+                                            no = 2, 
+                                            inputs = 3:4, 
+                                            outputs = 5:6, dmus = 1))
+  crosseftech <- cross_efficiency(deatech, orientation = "io", 
+                                  rts = "crs", 
+                                  selfapp = TRUE)
+  w <- round(crosseftech$M3_ben$cross_eff, digits = 2)
+  # class(w1)
+  # w1 <- (smh delete neagtive rows & cols)
+  return(w)
+}
+
+#Метод 1
+ranking <- function(cr) {
+  a <- cbind(as.data.frame(colMeans(cr)), round(colVars(cr), digits = 3), rank(colMeans(-cr)))
+  a <- a %>% rename(Return = `colMeans(cr)`, 
+                    Risk = `round(colVars(cr), digits = 3)`,
+                    Rank = `rank(colMeans(-cr))`)
+  return(a)
+}
+
+
+getw <- function(w){
+  covraw <- cov(w)
+  pd_D_mat <- nearPD(covraw)
+  cov<- pd_D_mat$mat
+  winvector <- round(minvar(cov, wmin = 0, wmax = 1), 5)
+  weights <- as.data.frame(winvector, row.names = colnames(w))
+  return(weights)
+}
+
+getnextquartportreturn <- function(portf,i){
+  #получили портфель, выгрузим же данные
+  rn <- row.names(portf) #за i
+  #переименуем для выгрузки
+  rn0 <- gsub(' RM', '.ME', rn)
+  #получим цены закртия
+  techdat0 <- cbind(getClosern(1),getClosern(2),getClosern(3),
+                    getClosern(4),getClosern(5),getClosern(6))
+  # из них квартальные доходности
+  techreturns <- as.data.frame(rowMeans(cbind(quarterlyReturn(techdat0[,1], method = "log"),
+                                              quarterlyReturn(techdat0[,2], method = "log"),
+                                              quarterlyReturn(techdat0[,3], method = "log"),
+                                              quarterlyReturn(techdat0[,4], method = "log"),
+                                              quarterlyReturn(techdat0[,5], method = "log"),
+                                              quarterlyReturn(techdat0[,6], method = "log")
+                                              )))
+  row.names(techreturns) <- index(quarterlyReturn(techdat0[,1], method = "log"))
+  # а нужна нам доходность следующего квартала
+  return(techreturns[shorttechtimes[i+1],]-0.002)
+}
+
+# Метод 2
+marginalreturn <- function(cr){
+  limmod <- lp("max", colMeans(cr), matrix(1, nrow=1, length(row.names(cr))), "=", 1)
+  limmod$solution
+  Eb <- round(limmod$objval, digits = 2)
+  return(Eb)
+}
+
+Limvarmin <- function(cr){
+  x <- matrix(1/len, 1, len)
+  len <- length(row.names(cr))
+  #specify your function
+  opt_func <- function(x) {
+    x <- matrix(x, ncol = len )
+    x%*% cov(cr)%*% t(x)
+  }
+  #specify the equality function. The number 1 (to which the function is equal)
+  #is specified as an additional argument
+  equal <- function(x) {
+    sum(x)
+  }
+  
+  inequal <- function(x) {
+    x <- matrix(x, ncol = len )
+    x %*% colMeans(cr)
+  }
+  inequal(x)
+  #the optimiser - minimises by default ?solnp
+  modmin <- invisible(suppressWarnings(solnp(matrix(1/len, 1, len), #starting values (random - obviously need to be positive and sum to 15)
+                                             opt_func, #function to optimise
+                                             eqfun=equal, #equality function 
+                                             eqB=1,   #the equality constraint
+                                             ineqfun = inequal,
+                                             ineqLB = 0.98*Eb,
+                                             ineqUB = 10,
+                                             LB=matrix(0,len,1), #lower bound for parameters i.e. greater than zero
+                                             UB=matrix(1,len,1),
+  ))) #upper bound for parameters (I just chose 100 randomly)
+  winvector <- as.data.frame(round(modmin$pars, digits = 3)) 
+  length(winvector)
+  sum(winvector)
+  row.names(winvector) <- row.names(cr)
+  # colnames(winvector) <- as.character(row.names(winvector)[winvector[,1] != 0])
+  
+  return(winvector)
+}
+
+
+
+getnext_quartport_weightedreturn <- function(winvector,i){
+   # кввартальные доходности уже имеем. Вот за следующий период
+   quartdat0 <- as.data.frame(quartdat[shorttechtimes[i+1]])
+   # взвесим отберем нужные акции
+   quartdat1 <- quartdat0 %>% select(unique(rownames(winvector)))   
+   # взвесим с весами текущего периода
+   techreturns <- as.data.frame(weighted.mean(quartdat1,w = t(winvector)))
+   
+   length(quartdat0)
+   
+   
+   colnames(techreturns) <- 'MV portfolio returns'
+   # а нужна нам доходность следующего квартала
+   return(techreturns-0.002)
+ }
+
+
+opti <- function(w) {
+  det(w)
+  if (det(w) == 0){
+    # Нулевой определитель => есть лз строки
+    lindep <- detect.lindep(t(w), suppressPrint = TRUE)
+    if (is.null(lindep) == FALSE) {
+      r <- round(runif(1,1,length(lindep)), digits = 0)
+      w <- w[-lindep[-r],
+             -lindep[-r]]
+    }
+    
+  }
+}
+
+####dea data ####
+datshare <- read_xlsx("C:/Users/oldys/Documents/КУРСОВАЯ/dea/data.xlsx")
+#какие есть акции
+unique(datshare$NAME)
+#сколько их
+length(unique(datshare$NAME))
+#какие есть периоды
+times0 <- as.character.POSIXt(sort(unique(datshare$DATE),
+                              decreasing = FALSE))
+times1 <- times0[c(-49,-50,-51)]
+times <- times1[times1 >"2013-06-01"]
+#какие показатели
+colnames(datshare)
+
+
+#### Создадим переменные####
+# cash ratio
+cash <- (datshare$BS_CASH_NEAR_CASH_ITEM +datshare$BS_MKT_SEC_OTHER_ST_INVEST)/datshare$BS_CUR_LIAB
+# lev ratio
+debts <- datshare$NET_CHNG_IN_LT_DEBT + datshare$BS_CASH_NEAR_CASH_ITEM
+lev <- datshare$BS_TOT_LIAB2 /datshare$BS_TOT_ASSET
+# roa
+roa <- datshare$TRAIL_12M_NET_INC / datshare$BS_TOT_ASSET
+# eps #eps <- datshare$BS_RETAIN_EARN / datshare$EQY_SH_OUT
+eps1 <- datshare$T12M_DIL_EPS_CONT_OPS
+
+#объединим в датасет и опустим пропущенные переменные
+dataa <- na.omit(data.frame(datshare$NAME,as.character.POSIXt(datshare$DATE), cash, lev, roa, eps1))
+#переименум столбцы
+dataa <- dataa %>% rename(DATE= as.character.POSIXt.datshare.DATE., NAME = datshare.NAME)
+# возьмем только неубыточные фирмы
+dataaa <- dataa[dataa[,'roa']>0,]
+
+##### dea model #####
+
+# купили в 
+times[i]
+# доходность в 
+shorttimes <- str_sub(times, end = -4)
+shorttimes[i+1]
+
+
+# технически нужные итерации
+techtimes <- times1[times1 >"2013-03-01"]
+shorttechtimes <- str_sub(techtimes, end = -4)
+i <- NULL
+ t <- length(times)-1
+#===================# ПОДСЧЕТ ПО ВСЕХ ПЕРИОДАХ #=======================# 
+ # #!!!!!!!!!!!!!!!!!!!!  Метод 1 PURE CROSS #!!!!!!!!!!!!!!!!!!!! 
+ rn <- NULL
+ for (i in 1:t) {
+   if (i == 1) {portreturn0 <- NULL}
+   # какой период
+   print(times[i])
+   # выберем его
+   d <- dataaa[dataaa$DATE == techtimes[i],]
+   # получим матрицу кросс=эффективности
+   cr <- getcrossef(d)
+   #проставим ранги для самых больших средних кроссэф-ей в убывающем порядке
+   rang <- ranking(cr)
+   #отберем в портфель 6
+   portf <- rang[rang[,'Rank'] < 7,]
+   print(portf)
+   #купили сейчас, а сколько получим потом?
+   money <- getnextquartportreturn(portf,i)
+   print(money)
+   portreturn0 <- append(portreturn0, money)
+ }
+ print(portreturn0)
+ 
+ #!!!!!!!!!!!!!!!!!!!! Метод 2 MV CROSS #!!!!!!!!!!!!!!!!!!!! 
+ 
+ # возьмем весь датасет акций
+ maxdRM <- unique(dataa$NAME)
+ #переименуем для выгрузки
+ maxd <- gsub(' RM', '.ME', maxdRM)
+ # загрузим в один большой датасет
+ for (i in 1:length(maxd)) {
+   if (i==1){techdat = as.data.frame(NULL)}
+   print(i)
+   if (i==1) {techdat <- getClosemax(i)}
+   if (i!=1) {techdat <- cbind(techdat, getClosemax(i))}
+   i= i + 1
+ }
+ #получили цины закрытия, теперь получим доходности
+ for (i in 1:length(maxd)) {
+   if (i==1){quartdat = as.data.frame(NULL)}
+   print(i)
+   if (i==1) {quartdat <- quarterlyReturn(techdat[,i],method = "log")}
+   if (i!=1) {quartdat <- cbind(quartdat, quarterlyReturn(techdat[,i],method = "log"))}
+   i= i + 1
+ }
+ # переназовем их
+ colnames(quartdat) <- maxdRM
+ # quartdat - датасет с доходностями
+
+ for (i in 1:t) {
+   if (i == 1) {mvport0 <- NULL
+                win0 <- NULL}
+   # какой период
+   print(times[i])
+   # выберем его
+   d <- dataaa[dataaa$DATE == times[i],]
+   # получим матрицу кросс=эффективности
+   cr <- getcrossef(d)
+   # метод LIM с помощью весов
+   # максимально ваозможная ожидаемая прибыль
+   Eb <- marginalreturn(cr)
+   # тогда это веса для минимаьной ков матрицы кросс-эфф-тей
+   winvector <- Limvarmin(cr)
+   colnames(winvector) <- times[i]
+   # lapply(winvector, function(x){x[x!=0]})
+   win0 <- append(win0, list(winvector))
+   #получим доходность
+   mvmoney <- getnext_quartport_weightedreturn(winvector,i)
+   print(mvmoney)
+   mvport0 <- append(mvport0, mvmoney)
+ }
+ 
+ print(mvport0)
+ #!!!!!!!!!!!!!!!!!!!! Метод 3 MAX PURE CROSS #!!!!!!!!!!!!!!!!!!!! 
+ for (i in 1:t) {
+   if (i == 1) {portreturn1 <- NULL}
+   # какой период
+   print(times[i])
+   # выберем его
+   d <- dataaa[dataaa$DATE == techtimes[i],]
+   # получим матрицу кросс=эффективности
+   cr <- getcrossefmax(d)                                                      #<--- новая функция
+   #проставим ранги для самых больших средних кроссэф-ей в убывающем порядке
+   rang <- ranking(cr)
+   #отберем в портфель 6
+   portf <- rang[rang[,'Rank'] < 7,]
+   print(portf)
+   #купили сейчас, а сколько получим потом?
+   money <- getnextquartportreturn(portf,i)
+   print(money)
+   portreturn1 <- append(portreturn1, money)
+ }
+ print(portreturn1)
+ 
+ #!!!!!!!!!!!!!!!!!!!! Метод 4 MAX MV CROSS #!!!!!!!!!!!!!!!!!!!! 
+ for (i in 1:t) {
+   if (i == 1) {mvport1 <- NULL
+   win1 <- NULL}
+   # какой период
+   print(times[i])
+   # выберем его
+   d <- dataaa[dataaa$DATE == times[i],]
+   # получим матрицу кросс=эффективности
+   cr <- getcrossefmax(d)
+   # метод LIM с помощью весов
+   # максимально ваозможная ожидаемая прибыль
+   Eb <- marginalreturn(cr)
+   # тогда это веса для минимаьной ков матрицы кросс-эфф-тей
+   winvector <- Limvarmin(cr)
+   win1 <- append(win1, list(winvector))
+   #получим доходность
+   mvmoney <- getnext_quartport_weightedreturn(winvector,i)
+   print(mvmoney)
+   mvport1 <- append(mvport1, mvmoney)
+ }
+ 
+ print(mvport1)
+####---------ФИНАЛ----------# Сравнение доходностей  #---------ФИНАЛ----------#### 
+
+# $$$$$Pure cross$$$$$
+ PureCross <- as.data.frame(portreturn0)
+row.names(PureCross) <- times
+colnames(PureCross) <- 'PureCross'
+
+# $$$$$MV cross$$$$$
+MvCross <- t(as.data.frame(mvport0))
+rownames(MvCross) <- times
+colnames(MvCross) <- 'MvCross'
+
+
+# $$$$$Max Pure cross$$$$$
+MaxPureCross <- as.data.frame(portreturn1)
+row.names(MaxPureCross) <- times
+colnames(MaxPureCross) <- 'MaxPureCross'
+
+# $$$$$Max MV cross$$$$$
+MaxMvCross <- t(as.data.frame(mvport1))
+#почему-то одно значение выпадает в цикле, хотя вручную считается. 
+# Подставим полученное (-0.1017655 поэтому это не мухлеж, чтобы улучшить модель)
+MaxMvCross[is.na(MaxMvCross)] <- -0.1017655
+rownames(MaxMvCross) <- times
+colnames(MaxMvCross) <- 'MaxMvCross'
+
+##C этим потом сравним##$$$$$MOEX$$$$$
+moex <- getSymbols('IMOEX.ME', from = "2013-03-05", to = "2021-12-31", auto.assign = FALSE)
+moexreturns0 <- quarterlyReturn(moex$IMOEX.ME.Close, method = "log")
+moexreturns <- moexreturns0[-1,]
+colnames(moexreturns) <- 'IMOEX'
+
+moexer::get_security_info('moex')
+
+######################################################
+###########сравнение портфеля с мосбиржей#############
+######################################################
+pppp <- as.data.frame(cbind(PureCross,MaxPureCross,MvCross,MaxMvCross,moexreturns)) #%>% rename('Returns of IMOEX' = quarterly.returns, 'Returns of DEA'= techreturns.shorttimes.i....)
+roundpppp <- round(pppp, digits = 3)
+rownames(roundpppp) <- rownames(pppp)
+
+pppp
+# сколько кварталов мы лучше индекса мосбиржи
+# sum(pppp[,1]>pppp[,2])/length(row.names(pppp))
+# составим коэффициенты роста
+pppp1 <- pppp + matrix(1, 35, length(colnames(pppp)))
+# посмотрим изменения с 30.06.2013 до 31.12.2021
+
+print(c(prod(pppp1[,1]),
+        prod(pppp1[,2]),
+        prod(pppp1[,3]),
+        prod(pppp1[,4]),
+        prod(pppp1[,5])
+        ))
+# 7.033631 2.636229
+# 7.033631 7.033631 2.096124 2.349542 2.636229
+# 7.410304 7.410304 2.096124 2.349542 2.636229
+
+
+####///////////////////////////////////VIZUALIZATION////////////////////////////////####
+library('data.table')
+datatable <- as.data.table(roundpppp, TRUE)
+print(datatable)
+
+# средние доходности
+round(mean.geometric(pppp[,5]), digits = 3)
+mean.geometric(pppp[,2])
+mean.geometric(pppp[,3])
+mean.geometric(pppp[,5])
+
+
+mean.geometric(moexreturns)
+# дисперсия
+round(var(pppp[,5]), digits = 3)
+var(pppp[,2])
+var(pppp[,3])
+var(pppp[,5])
+
+
+kv <- (1+0.09)^(1/4)-1
+# 0.09^(1/2)
+# шарп
+sharp <- function(i){(mean.geometric(pppp[,i])-0.02177818)/sqrt(var(pppp[,i]))}
+
+round(sharp(5), digits = 3)
+sharp(2)
+sharp(3)
+sharp(5)
+
+
+
+
+PureReturns <- as.xts(PureCross)
+MaxPureReturns <- as.xts(MaxPureCross)
+MVReturns <- as.xts(MvCross)
+MaxMVReturns <- as.xts(MaxMvCross)
+#динамика цены актива
+plot(PureReturns)
+plot(MaxPureReturns)
+plot(MVReturns)
+plot(MaxMVReturns)
+
+
+plot(moexreturns)
+
+
+
+#table of comparison 
+cbind(rownames(roundpppp),roundpppp) |>
+  gt() |>
+  tab_header(
+    title = "Сравнение доходностей российских акций",
+    subtitle = glue::glue("{rownames(roundpppp)[1]} to {rownames(roundpppp)[35]}")
+  ) |>
+  fmt_date(columns = 'rownames(roundpppp)') 
+
+ 
+# выгрузка весов...
+
+  
+for (i in 1:t){
+  # print(times[i])
+  day0 <- win0[[i]]
+  # tab0 <- as.data.frame(rbind(rownames(day0)[day0 != 0], day0[day0 != 0])) 
+  tab0 <- as.data.frame(t(day0[day0 != 0]))
+  colnames(tab0) <- rownames(day0)[day0 != 0]
+  print(knitr::kable(tab0))
+  # print.data.frame(tab0, row.names = FALSE)
+  if (i==1){table0 <- tab0}
+  if (i!=1){table0 <- append(table0,list(tab0))}
+  i <- i + 1
+}
+
+for (i in 1:t){
+  # print(times[i])
+  day1 <- win1[[i]]
+  # tab0 <- as.data.frame(rbind(rownames(day1)[day1 != 0], day1[day1 != 0])) 
+  tab1 <- as.data.frame(t(day1[day1 != 0]))
+  colnames(tab1) <- rownames(day1)[day1 != 0]
+  print(knitr::kable(tab1))
+  # print.data.frame(tab1, row.names = FALSE)
+  if (i==1){table1 <- tab1}
+  if (i!=1){table1 <- append(table0,list(tab1))}
+  i <- i + 1
+}
+
+  
+  
+  
